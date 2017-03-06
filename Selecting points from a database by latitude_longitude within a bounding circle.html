@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <title>Selecting points from a database by latitude/longitude within a bounding circle</title>
+    <meta charset="utf-8">
+    <meta name="author" content="Chris Veness, www.movable-type.co.uk">
+    <meta name="keywords" content="latitude longitude distance database bounding circle select">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/normalize/4.2.0/normalize.min.css">
+    <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/prettify/r298/prettify.css">
+    <link rel="stylesheet" href="../css/base.css">
+    <link rel="stylesheet" href="../css/eb-garamond/stylesheet.css">
+    <link rel="stylesheet" href="../css/mtl.css">
+    <style>
+        #content { max-width: 64em; }
+        pre.prettyprint { padding: 1em; border: 1px solid #cccccc; }
+    </style>
+    <!--[if lt IE 9]><script src="//html5shim.googlecode.com/svn/trunk/html5.js"></script><![endif]-->
+    <script src="//code.jquery.com/jquery-3.0.0.min.js"></script>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/prettify/188.0.0/prettify.js">/* r224/r298 don't work! */</script>
+    <script src="/js/mtl.js">/* MTL utils */</script>
+    <script>
+      $(document).ready(function() {
+        prettyPrint();
+      });
+    </script>
+</head>
+<body>
+
+<header> <a href="/" title="Movable Type Home Page"><img src="../images/mtl.gif" alt="Movable Type Home Page"></a>
+  <h1>Movable Type Scripts</h1>
+  <hr>
+  <h2>Selecting points within a bounding circle</h2>
+</header>
+
+<div id="content">
+
+    <p>My <a href="latlong.html">latitude/longitude</a> page presents a range of geodesy formulæ, including the distance
+      between two points. This formula can be used for selecting points from a database.</p>
+
+    <p>To select points from a database
+      within a certain distance from a given latitude/longitude point, within a selection circle, you can
+      use the <a href="latlong.html#cosine-law">spherical law of cosines</a> formula,
+      which gives the great-circle distance between two points on the earth’s surface. You can use a SQL
+      query which selects points from a database table within a given distance of the centre of a bounding
+      circle.</p>
+
+    <table>
+      <tr>
+        <td>The <b>cosine law</b> is:</td>
+        <td><b>d = acos( sin(φ<sub>1</sub>)⋅sin(φ<sub>2</sub>) + cos(φ<sub>1</sub>)⋅cos(φ<sub>2</sub>)⋅cos(Δλ) ) ⋅ R</b></td>
+      </tr>
+      <tr>
+        <td class="align-right">where:</td>
+        <td>φ = latitude, λ = longitude (in radians)<br>R = radius of earth<br>d = distance between the points (in same units as R)</td>
+      </tr>
+    </table>
+
+    <p>Using this formula, the SQL query to select points within the bounding circle is:</p>
+
+    <pre class="prettyprint lang-sql">
+Select Id, Postcode, Lat, Lon,
+       acos(sin(:lat)*sin(radians(Lat)) + cos(:lat)*cos(radians(Lat))*cos(radians(Lon)-:lon)) * :R As D
+From MyTable
+Where acos(sin(:lat)*sin(radians(Lat)) + cos(:lat)*cos(radians(Lat))*cos(radians(Lon)-:lon)) * :R &lt; :rad</pre>
+
+    <p>Assuming table includes fields Id, Postcode, Lat, and Lon, with Lat/Lon stored as signed degrees
+        (I use double(9,6) for storing degrees, giving sub-metre precision).</p>
+
+    <h3>First-cut bounding box</h3>
+
+    <p>One problem with this is that it works through the entire table, using the cosine law to find the
+        distance of every single point from the given centre point.</p>
+
+    <p>We can make it significantly more efficient by using a bounding box to do an initial ‘first cut’
+        (how much more efficient depends on the number of points and the portion to be included).</p>
+
+    <p>The bounding latitudes are obtained by adding/subtracting the radius from the latitude; the bounding
+        longitudes shrink with increasing latitude, so need to be adjusted.</p>
+
+    <div style="margin-left:8em">φ<sub>bounds</sub> = φ ± d/R<br>
+        λ<sub>bounds</sub> = λ ± (d/R) / cosφ</div>
+    <p>Actually, as the bounding circle becomes larger, this becomes slightly inaccurate: more strictly, the bounding
+        latitudes should be<sup><a href="http://janmatuschek.de/LatitudeLongitudeBoundingCoordinates#Longitude">*</a></sup></p>
+    <div style="margin-left:8em">λ<sub>bounds</sub> = λ ± asin(d/R) / cosφ</div>
+
+
+    <p>In this example, I will use PHP, though other web scripting languages such as JavaScript, ASP or ColdFusion will
+        work similarly, as will db procedural languages such as PL/SQL or VBA. The SQL should be common to
+        any DBMS, though the execution methods vary between systems – here I will use MySQL+PDO.</p>
+
+    <p>If you have parameters <span class="code">$lat</span> and <span class="code">$lon</span> for the centre
+        of the bounding circle, and <span class="code">$rad</span> for
+        the radius of the bounding circle (in km), and use <span class="code">$R</span> for
+        the radius of the earth (6371km), then:</p>
+
+    <pre class="prettyprint lang-php">
+// first-cut bounding box (in degrees)
+$maxLat = $lat + rad2deg($rad/$R);
+$minLat = $lat - rad2deg($rad/$R);
+$maxLon = $lon + rad2deg(asin($rad/$R) / cos(deg2rad($lat)));
+$minLon = $lon - rad2deg(asin($rad/$R) / cos(deg2rad($lat)));
+
+$sql = "Select Id, Postcode, Lat, Lon
+        From MyTable
+        Where Lat Between :minLat And :maxLat
+          And Lon Between :minLon And :maxLon";</pre>
+
+    <p>Assuming the Lat and Lon columns are indexed, this should be very efficient.</p>
+
+    <p>For some situations, this will suffice – for example, selecting points to display on a square map.</p>
+
+    <p>If we want to sort the results by distance (or only want those points within a given radius),
+        we can use a sub-query to combine the simpler ‘first cut’ with the accurate cosine law:</p>
+
+    <pre class="prettyprint lang-sql">
+Select Id, Postcode, Lat, Lon,
+       acos(sin(:lat)*sin(radians(Lat)) + cos(:lat)*cos(radians(Lat))*cos(radians(Lon)-:lon)) * :R As D
+From (
+    Select Id, Postcode, Lat, Lon
+    From MyTable
+    Where Lat Between :minLat And :maxLat
+      And Lon Between :minLon And :maxLon
+    ) As FirstCut
+Where acos(sin(:lat)*sin(radians(Lat)) + cos(:lat)*cos(radians(Lat))*cos(radians(Lon)-:lon)) * :R &lt; :rad
+Order By D</pre>
+
+    <p>In this case, we are only applying the more expensive cosine law to points within the bounding box
+        which encompasses the bounding circle.</p>
+
+    <p>If the query optimisation is decent, this simpler version should also be efficient (possibly better):</p>
+
+    <pre class="prettyprint lang-sql">
+Select Id, Postcode, Lat, Lon,
+       acos(sin(:lat)*sin(radians(Lat)) + cos(:lat)*cos(radians(Lat))*cos(radians(Lon)-:lon)) * :R As D
+From MyTable
+Where Lat Between :minLat And :maxLat
+  And Lon Between :minLon And :maxLon
+  And acos(sin(:lat)*sin(radians(Lat)) + cos(:lat)*cos(radians(Lat))*cos(radians(Lon)-:lon)) * :R &lt; :rad
+Order By D</pre>
+
+    <h3>Full solution</h3>
+
+    <p>We can put this all together to get a list of points within a bounding circle. In this example, it
+        is a single vanilla-PHP web page which takes URL query arguments lat, lon, rad and lists the points
+        as an html page.</p>
+
+    <p>In a real application, this would more typically be done within a framework, and based on a
+        <a href="https://gist.github.com/chrisveness/c8b2a90bcfa91aa1e919">geocoded address</a>, but
+        this vanilla-PHP should be recognisable to any developer.</p>
+
+<pre class="prettyprint lang-php">
+&lt;?php
+/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  */
+/*  Selection of points within specified radius of given lat/lon      (c) Chris Veness 2008-2016  */
+/* - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  */
+
+    require 'inc/dbparams.inc.php';  // defines $dsn, $username, $password
+    $db = new PDO($dsn, $username, $password);
+    $db-&gt;setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_OBJ);
+
+    $lat = $_GET['lat']; // latitude of centre of bounding circle in degrees
+    $lon = $_GET['lon']; // longitude of centre of bounding circle in degrees
+    $rad = $_GET['rad']; // radius of bounding circle in kilometers
+
+    $R = 6371;  // earth's mean radius, km
+
+    // first-cut bounding box (in degrees)
+    $maxLat = $lat + rad2deg($rad/$R);
+    $minLat = $lat - rad2deg($rad/$R);
+    $maxLon = $lon + rad2deg(asin($rad/$R) / cos(deg2rad($lat)));
+    $minLon = $lon - rad2deg(asin($rad/$R) / cos(deg2rad($lat)));
+
+    $sql = "Select Id, Postcode, Lat, Lon,
+                   acos(sin(:lat)*sin(radians(Lat)) + cos(:lat)*cos(radians(Lat))*cos(radians(Lon)-:lon)) * :R As D
+            From (
+                Select Id, Postcode, Lat, Lon
+                From MyTable
+                Where Lat Between :minLat And :maxLat
+                  And Lon Between :minLon And :maxLon
+            ) As FirstCut
+            Where acos(sin(:lat)*sin(radians(Lat)) + cos(:lat)*cos(radians(Lat))*cos(radians(Lon)-:lon)) * :R &lt; :rad
+            Order by D";
+    $params = [
+        'lat'    => deg2rad($lat),
+        'lon'    => deg2rad($lon),
+        'minLat' => $minLat,
+        'minLon' => $minLon,
+        'maxLat' => $maxLat,
+        'maxLon' => $maxLon,
+        'rad'    => $rad,
+        'R'      => $R,
+    ];
+    $points = $db-&gt;prepare($sql);
+    $points-&gt;execute($params);
+?&gt;
+
+&lt;html&gt;
+&lt;table&gt;
+    &lt;? foreach ($points as $point): ?&gt;
+    &lt;tr&gt;
+        &lt;td&gt;&lt;?= $point-&gt;Postcode ?&gt;&lt;/td&gt;
+        &lt;td&gt;&lt;?= number_format($point-&gt;Lat,4) ?&gt;&lt;/td&gt;
+        &lt;td&gt;&lt;?= number_format($point-&gt;Lon,4) ?&gt;&lt;/td&gt;
+        &lt;td&gt;&lt;?= number_format($point-&gt;D,3) ?&gt;&lt;/td&gt;
+    &lt;/tr&gt;
+    &lt;? endforeach ?&gt;
+&lt;/table&gt;
+&lt;/html&gt;</pre>
+
+    <p>Note that special treatment would be required for a bounding circle which crosses the 180&deg; meridian
+      – by happy coincidence of geography, not many people need to worry about that!</p>
+    <p>If you prefer to work in miles, set the earth’s radius <span class="code">$R</span> to 3959.</p>
+
+    <hr class="fullwidth">
+    <p id="licence"><a href="http://opensource.org/licenses/MIT" class="float-right"><img src="license-osi-mit.png" alt="OSI MIT License"></a>
+        I offer these scripts for free use and adaptation to balance my debt to the open-source info-verse.
+        You are welcome to re-use these scripts [under an <a href="http://opensource.org/licenses/MIT">MIT</a> licence,
+        without any warranty express or implied] provided solely that you retain my copyright notice and a link to this page.</p>
+    <p id="donate"><a href="https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&amp;hosted_button_id=3737803" class="float-right">
+        <img alt="Paypal donation" style="margin:4px" src="https://www.paypal.com/en_GB/i/btn/btn_donate_SM.gif"></a>
+        If you would like to show your appreciation and support continued development of these scripts,
+        I would most gratefully accept <a href="https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&amp;hosted_button_id=3737803" title="Thank you!">donations</a>.</p>
+    <p>If you would like any advice or development work done on geodesy-related projects (including databases, server-side-,
+      and client-side-development), I am available for consultancy.</p>
+    <p>If you have any queries or find any problems, contact me at <span class="rtl">ku.oc.epyt-elbavom@oeg-stpircs</span>.</p>
+    <p><span class="note"><i>© 2008-2016 Chris Veness</i></span> </p>
+    <hr class="fullwidth">
+</div>
+
+</body>
+</html>
